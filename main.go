@@ -15,81 +15,87 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha1"
-	"encoding/hex"
+	"encoding/json"
+	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 
 	"github.com/tickstep/cloudpan189-api/cloudpan"
 	"github.com/tickstep/cloudpan189-api/cloudpan/apiutil"
-	"github.com/tickstep/library-go/jsonhelper"
 )
 
-type (
-	userpw struct {
-		UserName string `json:"username"`
-		Password string `json:"password"`
+func PostHeader(url string, msg []byte, headers map[string]string) (string, error) {
+	client := &http.Client{}
+
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(msg)))
+	if err != nil {
+		return "", err
 	}
-)
-
-// SignatureOfHmacV2 HMAC签名
-func SignatureOfHmacV2(secretKey, sessionKey, operate, url, dateOfGmt, param string) string {
-	requestUri := strings.Split(url, "?")[0]
-	requestUri = strings.ReplaceAll(requestUri, "https://", "")
-	requestUri = strings.ReplaceAll(requestUri, "http://", "")
-	idx := strings.Index(requestUri, "/")
-	requestUri = requestUri[idx:]
-
-	plainStr := &strings.Builder{}
-	fmt.Fprintf(plainStr, "SessionKey=%s&Operate=%s&RequestURI=%s&Date=%s",
-		sessionKey, operate, requestUri, dateOfGmt)
-	if param != "" {
-		plainStr.WriteString(fmt.Sprintf("&params=%s", param))
+	for key, header := range headers {
+		req.Header.Set(key, header)
 	}
-	key := []byte(secretKey)
-	mac := hmac.New(sha1.New, key)
-	mac.Write([]byte(plainStr.String()))
-	return strings.ToUpper(hex.EncodeToString(mac.Sum(nil)))
-}
-
-// SignatureOfHmac HMAC签名
-func SignatureOfHmac(secretKey, sessionKey, operate, url, dateOfGmt string) string {
-	return SignatureOfHmacV2(secretKey, sessionKey, operate, url, dateOfGmt, "")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 func main() {
-	configFile, err := os.OpenFile("userpw.txt", os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		fmt.Println("read user info error")
-		return
+	var command = ""
+	flag.StringVar(&command, "c", "", "command type")
+	var strInfo = ""
+	flag.StringVar(&strInfo, "d", "", "sessionKey and sessionSecret")
+	var familyId = ""
+	flag.StringVar(&familyId, "f", "", "famaily id")
+	flag.Parse()
+
+	if command == "login" {
+		// do login
+		appToken, e := cloudpan.AppLogin(os.Args[3], os.Args[4])
+		if e != nil {
+			fmt.Println(e)
+			return
+		}
+		fmt.Printf("{\"sessionKey\":\"%s\", \"sessionSecret\" :\"%s\"}", appToken.FamilySessionKey, appToken.SessionSecret)
+	} else if command == "clear" {
+		var jsonMap map[string]string
+		err := json.Unmarshal([]byte(strInfo), &jsonMap)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		sessionKey := jsonMap["sessionKey"]
+		sessionSecret := jsonMap["sessionSecret"]
+		httpMethod := "POST"
+		dateOfGmt := apiutil.DateOfGmtStr()
+		url := "https://api.cloud.189.cn/batch/createBatchTask.action?rand=" + apiutil.Rand() + "&clientType=TELEANDROID&model=M2012K11AC&version=10.1.3"
+		signature := strings.ToLower(apiutil.SignatureOfHmac(sessionSecret, sessionKey, httpMethod, url, dateOfGmt))
+
+		headers := map[string]string{
+			"accept":       "application/json;charset=UTF-8",
+			"user-agent":   "Ecloud/10.1.3 (M2012K11AC; ; xiaomi) Android/33",
+			"x-request-id": apiutil.XRequestId(),
+			"content-type": "multipart/form-data; boundary=4c1ed063-2af1-426a-947a-802d807a4700",
+			"date":         dateOfGmt,
+			"signature":    signature,
+			"sessionkey":   sessionKey,
+		}
+
+		payload := fmt.Sprintf("--4c1ed063-2af1-426a-947a-802d807a4700\r\nContent-Disposition: form-data; name=\"familyId\"\r\nContent-Transfer-Encoding: binary\r\nContent-Type: multipart/form-data; charset=utf-8\r\nContent-Length: %d\r\n\r\n%s\r\n--4c1ed063-2af1-426a-947a-802d807a4700\r\nContent-Disposition: form-data; name=\"groupId\"\r\nContent-Transfer-Encoding: binary\r\nContent-Type: multipart/form-data; charset=utf-8\r\nContent-Length: 4\r\n\r\nnull\r\n--4c1ed063-2af1-426a-947a-802d807a4700\r\nContent-Disposition: form-data; name=\"targetFolderId\"\r\nContent-Transfer-Encoding: binary\r\nContent-Type: multipart/form-data; charset=utf-8\r\nContent-Length: 4\r\n\r\nnull\r\n--4c1ed063-2af1-426a-947a-802d807a4700\r\nContent-Disposition: form-data; name=\"shareId\"\r\nContent-Transfer-Encoding: binary\r\nContent-Type: multipart/form-data; charset=utf-8\r\nContent-Length: 4\r\n\r\nnull\r\n--4c1ed063-2af1-426a-947a-802d807a4700\r\nContent-Disposition: form-data; name=\"type\"\r\nContent-Transfer-Encoding: binary\r\nContent-Type: multipart/form-data; charset=utf-8\r\nContent-Length: 13\r\n\r\nEMPTY_RECYCLE\r\n--4c1ed063-2af1-426a-947a-802d807a4700--", len(familyId), familyId)
+		body, err := PostHeader(url, []byte(payload), headers)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmt.Println(body)
 	}
-	defer configFile.Close()
-
-	userpw := &userpw{}
-	err = jsonhelper.UnmarshalData(configFile, userpw)
-	if err != nil {
-		fmt.Println("read user info error")
-		return
-	}
-
-	// do login
-	appToken, e := cloudpan.AppLogin(userpw.UserName, userpw.Password)
-	if e != nil {
-		fmt.Println(e)
-		return
-	}
-
-	sessionKey := appToken.FamilySessionKey
-	sessionSecret := appToken.FamilySessionSecret
-	httpMethod := "POST"
-	dateOfGmt := apiutil.DateOfGmtStr()
-	signature := strings.ToLower(SignatureOfHmac(sessionSecret, sessionKey, httpMethod, "https://api.cloud.189.cn/batch/createBatchTask.action?rand=1706541310636&clientType=TELEANDROID&model=M2012K11AC&version=10.1.3", dateOfGmt))
-
-	fmt.Println(appToken.SessionKey)
-	fmt.Println(signature)
-	fmt.Println(dateOfGmt)
-	fmt.Println("login success")
-	return
 }
