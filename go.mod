@@ -1,4 +1,4 @@
-module cloud189_cli
+module tianyi_cli
 
 go 1.21.7
 
